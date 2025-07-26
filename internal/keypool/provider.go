@@ -33,13 +33,13 @@ func NewProvider(db *gorm.DB, store store.Store, settingsManager *config.SystemS
 func (p *KeyProvider) SelectKey(groupID uint) (*models.APIKey, error) {
 	activeKeysListKey := fmt.Sprintf("group:%d:active_keys", groupID)
 
-	// 1. Atomically rotate the key ID from the list
-	keyIDStr, err := p.store.Rotate(activeKeysListKey)
+	// 1. Peek the key ID from the list head
+	keyIDStr, err := p.store.LPeek(activeKeysListKey)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, app_errors.ErrNoActiveKeys
 		}
-		return nil, fmt.Errorf("failed to rotate key from store: %w", err)
+		return nil, fmt.Errorf("failed to peek key from store: %w", err)
 	}
 
 	keyID, err := strconv.ParseUint(keyIDStr, 10, 64)
@@ -155,10 +155,17 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 			return fmt.Errorf("failed to lock key %d for update: %w", apiKey.ID, err)
 		}
 
-		newFailureCount := failureCount + 1
+		// Immediately rotate the key to ensure the next request gets a different one.
+		logrus.WithFields(logrus.Fields{"keyID": apiKey.ID}).Info("Key failed, rotating to next key.")
+		if _, err := p.store.Rotate(activeKeysListKey); err != nil {
+			// If rotation fails, we have a bigger problem with the store. Log and return.
+			return fmt.Errorf("failed to rotate key from active list on failure: %w", err)
+		}
 
+		newFailureCount := failureCount + 1
 		updates := map[string]any{"failure_count": newFailureCount}
 		shouldBlacklist := blacklistThreshold > 0 && newFailureCount >= int64(blacklistThreshold)
+
 		if shouldBlacklist {
 			updates["status"] = models.KeyStatusInvalid
 		}
@@ -172,12 +179,17 @@ func (p *KeyProvider) handleFailure(apiKey *models.APIKey, group *models.Group, 
 		}
 
 		if shouldBlacklist {
-			logrus.WithFields(logrus.Fields{"keyID": apiKey.ID, "threshold": blacklistThreshold}).Warn("Key has reached blacklist threshold, disabling.")
-			if err := p.store.LRem(activeKeysListKey, 0, apiKey.ID); err != nil {
-				return fmt.Errorf("failed to LRem key from active list: %w", err)
-			}
+			logrus.WithFields(logrus.Fields{"keyID": apiKey.ID, "threshold": blacklistThreshold}).Warn("Key has reached blacklist threshold, disabling and removing from active pool.")
+
+			// Update status to invalid in store cache
 			if err := p.store.HSet(keyHashKey, map[string]any{"status": models.KeyStatusInvalid}); err != nil {
 				return fmt.Errorf("failed to update key status to invalid in store: %w", err)
+			}
+
+			// Since the key is now blacklisted, remove it from the active list entirely.
+			// It was just rotated, so it's at the tail. LRem can remove it from anywhere.
+			if err := p.store.LRem(activeKeysListKey, 0, apiKey.ID); err != nil {
+				return fmt.Errorf("failed to LRem key from active list after blacklisting: %w", err)
 			}
 		}
 

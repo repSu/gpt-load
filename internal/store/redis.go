@@ -104,6 +104,17 @@ func (s *RedisStore) Rotate(key string) (string, error) {
 	return val, nil
 }
 
+func (s *RedisStore) LPeek(key string) (string, error) {
+	val, err := s.client.LIndex(context.Background(), key, 0).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return val, nil
+}
+
 // --- SET operations ---
 
 func (s *RedisStore) SAdd(key string, members ...any) error {

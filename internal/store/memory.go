@@ -302,6 +302,27 @@ func (s *MemoryStore) Rotate(key string) (string, error) {
 	return item, nil
 }
 
+func (s *MemoryStore) LPeek(key string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rawList, exists := s.data[key]
+	if !exists {
+		return "", ErrNotFound
+	}
+
+	list, ok := rawList.([]string)
+	if !ok {
+		return "", fmt.Errorf("type mismatch: key '%s' holds a different data type", key)
+	}
+
+	if len(list) == 0 {
+		return "", ErrNotFound
+	}
+
+	return list[0], nil
+}
+
 // --- SET operations ---
 
 // SAdd adds members to a set.

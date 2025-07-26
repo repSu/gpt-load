@@ -114,10 +114,12 @@ func (ps *ProxyServer) executeRequestWithRetry(
 			}
 			logrus.Debugf("Max retries exceeded for group %s after %d attempts. Parsed Error: %s", group.Name, retryCount, logMessage)
 
-			ps.logRequest(c, group, &models.APIKey{KeyValue: lastError.KeyValue}, startTime, lastError.StatusCode, retryCount, errors.New(logMessage), isStream, lastError.UpstreamAddr)
+			// The last error is already logged in the retry loop, so we don't log it again here.
+			// We just need to send the response to the client.
 		} else {
 			response.Error(c, app_errors.ErrMaxRetriesExceeded)
 			logrus.Debugf("Max retries exceeded for group %s after %d attempts.", group.Name, retryCount)
+			// This case is unexpected, but we should log it for debugging purposes.
 			ps.logRequest(c, group, nil, startTime, http.StatusServiceUnavailable, retryCount, app_errors.ErrMaxRetriesExceeded, isStream, "")
 		}
 		return
@@ -184,7 +186,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 	if err != nil || (resp != nil && resp.StatusCode >= 400) {
 		if err != nil && app_errors.IsIgnorableError(err) {
 			logrus.Debugf("Client-side ignorable error for key %s, aborting retries: %v", utils.MaskAPIKey(apiKey.KeyValue), err)
-			ps.logRequest(c, group, apiKey, startTime, 499, retryCount+1, err, isStream, upstreamURL)
+			ps.logRequest(c, group, apiKey, startTime, 499, retryCount, err, isStream, upstreamURL)
 			return
 		}
 
@@ -213,6 +215,13 @@ func (ps *ProxyServer) executeRequestWithRetry(
 			logrus.Debugf("Request failed with status %d (attempt %d/%d) for key %s. Parsed Error: %s", statusCode, retryCount+1, cfg.MaxRetries, utils.MaskAPIKey(apiKey.KeyValue), parsedError)
 		}
 
+		// Log the failed attempt before retrying
+		logMessage := parsedError
+		if logMessage == "" {
+			logMessage = errorMessage
+		}
+		ps.logRequest(c, group, apiKey, startTime, statusCode, retryCount, errors.New(logMessage), isStream, upstreamURL)
+
 		newRetryErrors := append(retryErrors, types.RetryError{
 			StatusCode:         statusCode,
 			ErrorMessage:       errorMessage,
@@ -227,7 +236,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 
 	// ps.keyProvider.UpdateStatus(apiKey, group, true) // 请求成功不再重置成功次数，减少IO消耗
 	logrus.Debugf("Request for group %s succeeded on attempt %d with key %s", group.Name, retryCount+1, utils.MaskAPIKey(apiKey.KeyValue))
-	ps.logRequest(c, group, apiKey, startTime, resp.StatusCode, retryCount+1, nil, isStream, upstreamURL)
+	ps.logRequest(c, group, apiKey, startTime, resp.StatusCode, retryCount, nil, isStream, upstreamURL)
 
 	for key, values := range resp.Header {
 		for _, value := range values {

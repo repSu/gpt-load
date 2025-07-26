@@ -49,6 +49,7 @@ type Store interface {
 	LPush(key string, values ...any) error
 	LRem(key string, count int64, value any) error
 	Rotate(key string) (string, error)
+	LPeek(key string) (string, error)
 
 	// SET operations
 	SAdd(key string, members ...any) error
